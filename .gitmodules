@@ -1,0 +1,8 @@
+[submodule "src/flightstack"]
+	path = src/flightstack
+	url = https://github.com/GiorgioAntonioOrlando/ACSL-flightstack.git
+	branch = sil-integration
+[submodule "src/simulator"]
+	path = src/simulator
+	url = https://github.com/GiorgioAntonioOrlando/UAV_Sim_PyChrono.git
+	branch = sil-integration

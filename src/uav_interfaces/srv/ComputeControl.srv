@@ -1,0 +1,25 @@
+# srv/ComputeControl.srv
+
+# ── REQUEST: simulator → flightstack ─────────────────────────────────
+float64 time
+
+float64 px
+float64 py
+float64 pz
+
+float64 vx
+float64 vy
+float64 vz
+
+float64 qx
+float64 qy
+float64 qz
+float64 qw
+
+float64 wx
+float64 wy
+float64 wz
+
+---
+# ── RESPONSE: flightstack → simulator ───────────────────────────────
+float64[] motor_commands

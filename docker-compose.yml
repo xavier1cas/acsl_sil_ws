@@ -1,0 +1,125 @@
+# version: "3.9"
+
+# Single source of truth for the controller type, shared by both services below
+# Controller type: PID, MRAC, TwoLayerMRAC, FunnelTwoLayerMRAC, HybridTwoLayerMRAC (falls back to PID if unset)
+x-controller-type: &controller_type "PID"
+
+services:
+
+  flightstack:
+    build:
+      context: .
+      dockerfile: docker/flightstack.Dockerfile
+    environment:
+      ROS_DOMAIN_ID: "42"
+      FASTRTPS_DEFAULT_PROFILES_FILE: /fastdds_no_shm.xml
+      # SIL_CONTROLLER_MODE: "simple"  # uncomment to use the debug P-controller instead of the real flightstack pipeline
+      CONTROLLER_TYPE: *controller_type
+    network_mode: host
+    volumes:
+    - ./src/flightstack/log:/ros2_ws/src/flightstack/log
+    - ./src/flightstack:/ros2_ws/src/flightstack          # ← add
+    - ./src/uav_interfaces:/ros2_ws/src/uav_interfaces
+    - ./docker/fastdds_no_shm.xml:/fastdds_no_shm.xml:ro
+    - flightstack_build:/ros2_ws/build
+    - flightstack_install:/ros2_ws/install
+    #  - ros2_net
+    healthcheck:
+      test: ["CMD", "bash", "-c",
+             "source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && ros2 service list 2>/dev/null | grep -q '/sil/compute_control'"]
+      interval: 10s
+      timeout: 6s
+      # Generous budget: changing CONTROLLER_TYPE forces a single-threaded (MAKEFLAGS=-j1)
+      # recompile of the flightstack package on container start, which can take many minutes.
+      retries: 180
+      start_period: 30s
+
+  
+  simulator:
+    build:
+      context: .
+      dockerfile: docker/simulator.Dockerfile
+    network_mode: host
+    environment:
+      ROS_DOMAIN_ID: "42"
+      UAV_SIL_MODE: "true"
+      DISPLAY: ":0"
+      GALLIUM_DRIVER: "d3d12"
+      LD_LIBRARY_PATH: "/usr/lib/wsl/lib"
+      FASTRTPS_DEFAULT_PROFILES_FILE: /fastdds_no_shm.xml
+      # Inherited from the flightstack's controller selection (see x-controller-type above)
+      CONTROLLER_TYPE: *controller_type
+    devices:
+      - /dev/dxg
+    volumes:
+      # Add only necessary directories to the simulator, excluding flightstack
+      - ./src/simulator:/ros2_ws/src/simulator
+      - ./src/uav_interfaces:/ros2_ws/src/uav_interfaces
+      - ./docker/fastdds_no_shm.xml:/fastdds_no_shm.xml:ro
+      # Read-only: lets the simulator inherit the trajectory selected for the flightstack
+      - ./src/flightstack/params/config/config.json:/ros2_ws/src/flightstack/params/config/config.json:ro
+      # WSLg: GPU-backed X11 socket + D3D12 Mesa driver libs, for hardware-accelerated rendering
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /mnt/wslg:/mnt/wslg
+      - /usr/lib/wsl:/usr/lib/wsl
+    command: >
+      python /ros2_ws/src/simulator/main.py
+        --uav X8
+        --simulation_duration 20.0
+        --visualize false
+        --add_payload false
+        --payload_type two_steel_balls
+        --drop_two_steel_balls false
+        --two_steel_balls_drop_time 15.0
+        --sequential_drop false
+        --sequential_drop_start 15.0
+        --sequential_drop_interval 10.0
+        --apply_motor_failure false
+        --motor_failure_time 15.0
+    depends_on:
+      flightstack:
+        condition: service_healthy
+    #networks:
+    #  - ros2_net
+
+  # Runs the GA tuner against the real SIL flightstack (PID, outer-loop, serial,
+  # restart-per-candidate — see ga_tuner/integration/sil/). Not part of the normal
+  # single-run workflow: `profiles: [tools]` keeps it out of a bare `docker compose up`.
+  # Invoke explicitly: `docker compose run --rm ga_tuner` (run from the repo root).
+  ga_tuner:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/simulator.Dockerfile
+    network_mode: host
+    environment:
+      ROS_DOMAIN_ID: "42"
+      UAV_SIL_MODE: "true"
+      FASTRTPS_DEFAULT_PROFILES_FILE: /fastdds_no_shm.xml
+      CONTROLLER_TYPE: *controller_type
+      # docker_lifecycle.py's repo-root discovery: must equal the host-absolute path
+      # this compose file lives in, since the `${PWD}:${PWD}` mount below mirrors the
+      # repo at an identical path so `docker compose` calls issued *inside* this
+      # container (via the mounted host socket) resolve their own relative bind-mount
+      # paths (e.g. ./src/flightstack/log) the same way the host's daemon expects.
+      SIL_REPO_ROOT: "${PWD}"
+    volumes:
+      - ./src/simulator:/ros2_ws/src/simulator
+      - ./src/uav_interfaces:/ros2_ws/src/uav_interfaces
+      - ./docker/fastdds_no_shm.xml:/fastdds_no_shm.xml:ro
+      # Read-only: same mount as the simulator service, so
+      # applyFlightstackTrajectoryOverride() can mirror config.json's trajectory
+      # selection into the GA's MissionConfig (single source of truth).
+      - ./src/flightstack/params/config/config.json:/ros2_ws/src/flightstack/params/config/config.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}:${PWD}
+    working_dir: ${PWD}
+    command: python /ros2_ws/src/simulator/acsl_pychrono/ga_tuner/run_tuner_sil.py
+
+#networks:
+#  ros2_net:
+#    driver: bridge
+
+volumes:
+  flightstack_build:
+  flightstack_install:
